@@ -9,7 +9,8 @@ def create_case_log(event_log):
     case_log = cases.agg(
         start_time=('time:timestamp','first'),
         end_time=('time:timestamp', 'last'),
-        no_of_events=('concept:name', 'count'))
+        no_of_events=('concept:name', 'count'),
+        sequential_variant=('concept:name', lambda x: ' -> '.join(x)))
     case_log['duration'] = case_log['end_time'] - case_log['start_time']
     return case_log
 
@@ -172,7 +173,32 @@ def brute_force_case_log_enricher(case_log, event_log, include_time=True, case_i
     enriches a case log by adding for each activity, the number of occurrences in a case, as well as start times and delays
     """
     # TODO relative log time forward and backward
+    def add_relative_time(case_log, event_log, case_id_col, activity_col):
+            # Create a timestamp column for each event
+            event_log['time:timestamp'] = pd.to_datetime(event_log['time:timestamp'])
+            event_log = event_log.sort_values(by=['case:concept:name', 'time:timestamp'])
+            
+            # Calculate the relative time for each event
+            event_log['relative_time'] = event_log.groupby(case_id_col)['time:timestamp'].transform(lambda x: (x - x.min()).dt.total_seconds())
+            
+            # Add forward and backward time difference
+            event_log['forward_time'] = event_log.groupby(case_id_col)['relative_time'].shift(-1) - event_log['relative_time']
+            event_log['backward_time'] = event_log['relative_time'] - event_log.groupby(case_id_col)['relative_time'].shift(1)
+            
+            # Merge with case_log
+            case_log = case_log.merge(event_log[['case:concept:name', activity_col, 'relative_time', 'forward_time', 'backward_time']],
+                                    on=[case_id_col, activity_col], how='left')
+            
+            return case_log
+
     # TODO generic data attribute enrichment
+    def generic_attribute_enrichment(case_log, event_log, case_id_col, activity_col):
+        # Assuming you want to include additional attributes, you can customize this section
+        attributes_to_add = ['TotalFinesAndPenalties', 'outstanding_balance']  # Add attributes as needed
+        for attr in attributes_to_add:
+            if attr in event_log.columns:
+                case_log = case_log.merge(event_log[[case_id_col, attr]], on=case_id_col, how='left', suffixes=('', f'_{attr}'))
+        return case_log
     cases = event_log.groupby(case_id_col)
     activity_incidence = cases[activity_col].value_counts()
     activities = event_log[activity_col].unique()
@@ -183,5 +209,12 @@ def brute_force_case_log_enricher(case_log, event_log, include_time=True, case_i
     if include_time:
         case_log = case_add_activity_start_times(case_log, event_log, case_id_col=case_id_col, activity_col=activity_col)
         case_log = case_add_activity_delays(case_log, event_log, activity_col=activity_col)
+
+    # Adding relative log time
+    case_log = add_relative_time(case_log, event_log, case_id_col, activity_col)
+
+    # Adding generic data attribute enrichment
+    case_log = generic_attribute_enrichment(case_log, event_log, case_id_col, activity_col)
+
     return case_log
 
